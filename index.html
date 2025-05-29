@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JWT RS256 Verification</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: monospace;
+            transition: border-color 0.3s;
+        }
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        textarea {
+            height: 120px;
+            resize: vertical;
+        }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        .loading {
+            text-align: center;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 JWT RS256 Verification Tool</h1>
+
+        <div class="input-group">
+            <label for="jwksUrl">JWKS Endpoint URL:</label>
+            <input type="url" id="jwksUrl" value="https://dev-auth.moonshine.dev/oauth2/jwks" placeholder="https://example.com/.well-known/jwks.json">
+        </div>
+
+        <div class="input-group">
+            <label for="jwtToken">JWT Token:</label>
+            <textarea id="jwtToken" placeholder="Paste your JWT token here..."></textarea>
+        </div>
+
+        <button onclick="verifyToken()" id="verifyBtn">🔍 Verify Token</button>
+
+        <div id="result"></div>
+    </div>
+
+    <script>
+        class BrowserJWTVerifier {
+            constructor() {
+                this.keyCache = new Map();
+            }
+
+            // Fetch JWKS from endpoint
+            async fetchJWKS(url) {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch JWKS: ${response.status} ${response.statusText}`);
+                }
+                return await response.json();
+            }
+
+            // Base64URL decode
+            base64UrlDecode(str) {
+                // Replace URL-safe characters
+                str = str.replace(/-/g, '+').replace(/_/g, '/');
+                // Add padding
+                while (str.length % 4) {
+                    str += '=';
+                }
+                return Uint8Array.from(atob(str), c => c.charCodeAt(0));
+            }
+
+            // Base64URL encode
+            base64UrlEncode(buffer) {
+                return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+                    .replace(/\+/g, '-')
+                    .replace(/\//g, '_')
+                    .replace(/=/g, '');
+            }
+
+            // Convert JWK to CryptoKey using Web Crypto API
+            async jwkToCryptoKey(jwk) {
+                if (jwk.kty !== 'RSA') {
+                    throw new Error('Only RSA keys are supported');
+                }
+
+                // Import the JWK as a CryptoKey
+                return await crypto.subtle.importKey(
+                    'jwk',
+                    {
+                        kty: jwk.kty,
+                        n: jwk.n,
+                        e: jwk.e,
+                        alg: 'RS256',
+                        use: 'sig'
+                    },
+                    {
+                        name: 'RSASSA-PKCS1-v1_5',
+                        hash: 'SHA-256'
+                    },
+                    false,
+                    ['verify']
+                );
+            }
+
+            // Get public key for given kid
+            async getPublicKey(kid, jwksUrl) {
+                const cacheKey = `${jwksUrl}:${kid}`;
+                if (this.keyCache.has(cacheKey)) {
+                    return this.keyCache.get(cacheKey);
+                }
+
+                const jwks = await this.fetchJWKS(jwksUrl);
+                const jwk = jwks.keys.find(key => key.kid === kid);
+
+                if (!jwk) {
+                    throw new Error(`Key with kid "${kid}" not found in JWKS. Available keys: ${jwks.keys.map(k => k.kid).join(', ')}`);
+                }
+
+                const cryptoKey = await this.jwkToCryptoKey(jwk);
+                this.keyCache.set(cacheKey, cryptoKey);
+                return cryptoKey;
+            }
+
+            // Decode JWT parts
+            decodeJWT(token) {
+                const parts = token.split('.');
+                if (parts.length !== 3) {
+                    throw new Error('Invalid JWT format - must have 3 parts separated by dots');
+                }
+
+                const [headerB64, payloadB64, signatureB64] = parts;
+
+                try {
+                    const headerBytes = this.base64UrlDecode(headerB64);
+                    const header = JSON.parse(new TextDecoder().decode(headerBytes));
+
+                    const payloadBytes = this.base64UrlDecode(payloadB64);
+                    const payload = JSON.parse(new TextDecoder().decode(payloadBytes));
+
+                    const signature = this.base64UrlDecode(signatureB64);
+
+                    return { header, payload, signature, headerB64, payloadB64 };
+                } catch (error) {
+                    throw new Error(`Failed to decode JWT: ${error.message}`);
+                }
+            }
+
+            // Format timestamp for display
+            formatTimestamp(timestamp) {
+                return new Date(timestamp * 1000).toISOString();
+            }
+
+            // Verify JWT token
+            async verifyToken(token, jwksUrl) {
+                const result = {
+                    valid: false,
+                    header: null,
+                    payload: null,
+                    errors: [],
+                    warnings: [],
+                    info: []
+                };
+
+                try {
+                    // Decode JWT
+                    const { header, payload, signature, headerB64, payloadB64 } = this.decodeJWT(token);
+                    result.header = header;
+                    result.payload = payload;
+
+                    result.info.push(`Token decoded successfully`);
+                    result.info.push(`Algorithm: ${header.alg}`);
+                    result.info.push(`Key ID: ${header.kid}`);
+                    result.info.push(`Subject: ${payload.sub || 'N/A'}`);
+                    result.info.push(`Issuer: ${payload.iss || 'N/A'}`);
+                    result.info.push(`Audience: ${payload.aud || 'N/A'}`);
+
+                    // Verify algorithm
+                    if (header.alg !== 'RS256') {
+                        throw new Error(`Unsupported algorithm: ${header.alg}. Only RS256 is supported.`);
+                    }
+
+                    // Check timing claims
+                    const now = Math.floor(Date.now() / 1000);
+
+                    if (payload.iat) {
+                        result.info.push(`Issued at: ${this.formatTimestamp(payload.iat)}`);
+                    }
+
+                    if (payload.exp) {
+                        result.info.push(`Expires at: ${this.formatTimestamp(payload.exp)}`);
+                        if (now >= payload.exp) {
+                            result.errors.push(`Token has expired (expired ${now - payload.exp} seconds ago)`);
+                        }
+                    } else {
+                        result.warnings.push('Token has no expiration time (exp claim)');
+                    }
+
+                    if (payload.nbf) {
+                        result.info.push(`Not valid before: ${this.formatTimestamp(payload.nbf)}`);
+                        if (now < payload.nbf) {
+                            result.errors.push(`Token not yet valid (${payload.nbf - now} seconds until valid)`);
+                        }
+                    }
+
+                    // Get public key and verify signature
+                    let publicKey;
+                    try {
+                        publicKey = await this.getPublicKey(header.kid, jwksUrl);
+                        result.info.push('✅ Matching public key found in JWKS');
+                    } catch (keyError) {
+                        result.errors.push(`Key retrieval failed: ${keyError.message}`);
+                        throw keyError;
+                    }
+
+                    // Verify signature using Web Crypto API
+                    const signatureData = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+                    const isValidSignature = await crypto.subtle.verify(
+                        'RSASSA-PKCS1-v1_5',
+                        publicKey,
+                        signature,
+                        signatureData
+                    );
+
+                    if (!isValidSignature) {
+                        result.errors.push('❌ Invalid signature - token may be tampered with');
+                    } else {
+                        result.info.push('✅ Signature is valid');
+                    }
+
+                    // Overall validity
+                    result.valid = isValidSignature && result.errors.length === 0;
+
+                    if (result.valid) {
+                        result.info.push('🎉 Token is completely valid!');
+                    } else if (isValidSignature && result.errors.length > 0) {
+                        result.info.push('⚠️ Token signature is valid but has other issues (likely expired)');
+                    }
+
+                } catch (error) {
+                    result.errors.push(`Verification failed: ${error.message}`);
+                }
+
+                return result;
+            }
+        }
+
+        // Global verifier instance
+        const verifier = new BrowserJWTVerifier();
+
+        // Verify token function
+        async function verifyToken() {
+            const jwksUrl = document.getElementById('jwksUrl').value.trim();
+            const token = document.getElementById('jwtToken').value.trim();
+            const resultDiv = document.getElementById('result');
+            const verifyBtn = document.getElementById('verifyBtn');
+
+            if (!jwksUrl || !token) {
+                resultDiv.innerHTML = '<div class="result error">Please provide both JWKS URL and JWT token</div>';
+                return;
+            }
+
+            // Show loading state
+            verifyBtn.disabled = true;
+            verifyBtn.textContent = '🔄 Verifying...';
+            resultDiv.innerHTML = '<div class="result loading">Verifying token...</div>';
+
+            try {
+                const result = await verifier.verifyToken(token, jwksUrl);
+
+                let output = '';
+                let resultClass = '';
+
+                if (result.valid) {
+                    resultClass = 'success';
+                    output += '🎉 TOKEN IS VALID!\n\n';
+                } else {
+                    resultClass = 'error';
+                    output += '❌ TOKEN VERIFICATION FAILED\n\n';
+                }
+
+                // Show errors
+                if (result.errors.length > 0) {
+                    output += '🚨 ERRORS:\n';
+                    result.errors.forEach(error => output += `  • ${error}\n`);
+                    output += '\n';
+                }
+
+                // Show warnings
+                if (result.warnings.length > 0) {
+                    output += '⚠️ WARNINGS:\n';
+                    result.warnings.forEach(warning => output += `  • ${warning}\n`);
+                    output += '\n';
+                }
+
+                // Show info
+                if (result.info.length > 0) {
+                    output += 'ℹ️ INFORMATION:\n';
+                    result.info.forEach(info => output += `  • ${info}\n`);
+                    output += '\n';
+                }
+
+                // Show decoded payload
+                if (result.payload) {
+                    output += '📋 DECODED PAYLOAD:\n';
+                    output += JSON.stringify(result.payload, null, 2);
+                }
+
+                resultDiv.innerHTML = `<div class="result ${resultClass}">${output}</div>`;
+
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="result error">❌ Unexpected error: ${error.message}</div>`;
+            } finally {
+                verifyBtn.disabled = false;
+                verifyBtn.textContent = '🔍 Verify Token';
+            }
+        }
+
+        // Allow Enter key to trigger verification
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                verifyToken();
+            }
+        });
+
+        // Auto-verify on page load with demo token
+        window.addEventListener('load', function() {
+            // Small delay to ensure everything is loaded
+            setTimeout(() => {
+                const token = document.getElementById('jwtToken').value;
+                if (token.trim()) {
+                    verifyToken();
+                }
+            }, 500);
+        });
+    </script>
+</body>
+</html>
